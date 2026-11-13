@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.7
+
+# Dockerfile.refactored — motivo di ogni modifica rispetto all'originale
+#
+# 1. Immagine base pinnata per digest, non solo per tag: due build a settimane di distanza
+#    partono dalla stessa identica immagine. Alpine tiene l'immagine finale sotto i 250 MB.
+# 2. Stesso ARG per builder e runtime: una sola definizione della base, nessuna possibilità
+#    che i due stage divergano.
+# 3. Multi-stage: la toolchain di build (TypeScript e devDependencies) resta nel builder e
+#    non finisce nell'immagine di produzione.
+# 4. COPY dei soli package.json/package-lock.json prima del codice: se cambia un file
+#    sorgente, il layer di installazione delle dipendenze resta CACHED.
+# 5. npm ci invece di npm install: installa esattamente le versioni del lockfile, a ogni build.
+# 6. Runtime con npm ci --omit=dev: solo le dipendenze di produzione, niente tool di build.
+# 7. npm cache clean --force: rimuove la cache npm dal layer e riduce la dimensione.
+# 8. COPY --from=builder solo di /app/dist: nel runtime non entrano sorgenti né node_modules
+#    del builder.
+# 9. USER node: il processo gira con un utente non-root (uid 1000) già presente nell'immagine.
+# 10. tini come PID 1: inoltra correttamente SIGTERM/SIGINT, quindi docker stop chiude subito.
+# 11. HEALTHCHECK su 127.0.0.1: verifica che l'app risponda davvero; localhost può tentare
+#     prima IPv6 e far fallire il controllo.
+# 12. EXPOSE e CMD in forma exec: documentano la porta e passano i segnali al processo Node.
+# 13. .dockerignore esclude node_modules, dist e .git: anche con node_modules locale la riga
+#     "transferring context" resta piccola.
+# 14. `# syntax=docker/dockerfile:1.7` abilita la sintassi BuildKit dei cache mount.
+# 15. RUN --mount=type=cache,target=/root/.npm conserva i tarball npm tra una build e l'altra:
+#     se cambia package.json, npm ci riesegue ma non riscarica i pacchetti già in cache.
+# 16. Rimosso `npm cache clean --force`: svuoterebbe il cache mount. La cache non fa parte
+#     dell'immagine, quindi non ne aumenta la dimensione.
+
+ARG NODE_IMAGE=node:20.11.1-alpine3.19@sha256:bf77dc26e48ea95fca9d1aceb5acfa69d2e546b765ec2abfb502975f1a2d4def
+
+# Stage 1: build (TypeScript + devDependencies)
+FROM ${NODE_IMAGE} AS builder
+WORKDIR /app
+# Prima i manifest: questo layer resta in cache finché non cambiano le dipendenze.
+COPY package.json package-lock.json ./
+# npm ci = installazione riproducibile, esattamente dal lockfile.
+# Cache mount: i pacchetti scaricati restano in ~/.npm tra le build, fuori dall'immagine.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci
+# Solo ora il codice: una modifica a un sorgente invalida il build, non l'npm ci.
+COPY . .
+RUN npm run build
+
+# Stage 2: runtime minimale, solo dipendenze di produzione e output compilato
+FROM ${NODE_IMAGE} AS runtime
+# tini come init: PID 1 corretto e segnali inoltrati a Node.
+RUN apk add --no-cache tini
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json ./
+# Stesse versioni del lockfile, solo produzione; la cache npm resta nel cache mount,
+# non nell'immagine, quindi non serve (e non va) svuotarla.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --omit=dev
+# Dal builder arriva solo l'output: niente sorgenti né devDependencies.
+COPY --from=builder /app/dist ./dist
+# Non-root: l'utente node esiste già nell'immagine ufficiale.
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1:3000/healthz || exit 1
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/index.js"]

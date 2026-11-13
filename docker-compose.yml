@@ -1,0 +1,46 @@
+# docker-compose.yml (FE)
+services:
+  frontend:
+    build: ./percorso-fe
+    image: lipari-fe:dev
+    ports:
+      - "8080:80"
+    depends_on:
+      - mock-api
+    networks:
+      - app-net
+
+  # Backend simulato: serve mocks/db.json e tiene le risposte in Redis per CACHE_TTL secondi.
+  # L'header X-Cache dice da dove arriva ogni risposta: MISS, HIT o BYPASS.
+  mock-api:
+    build: ./mock-api
+    image: lipari-mock-api:dev
+    environment:
+      REDIS_URL: redis://cache:6379
+      CACHE_TTL: "30"
+      DATA_FILE: /data/db.json
+    volumes:
+      - ./percorso-fe/mocks:/data:ro
+    depends_on:
+      cache:
+        condition: service_healthy
+    networks:
+      - app-net
+
+  cache:
+    image: redis:7.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - cache_data:/data
+    networks:
+      - app-net
+
+volumes:
+  cache_data:
+
+networks:
+  app-net:

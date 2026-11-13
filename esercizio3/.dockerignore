@@ -1,0 +1,16 @@
+# Esclude dal build context ciò che non serve all'immagine.
+# node_modules locale non deve mai essere copiato: le dipendenze le installa npm ci.
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+npm-debug.log
+*.log
+coverage
+.vscode
+.idea
+README.md
+Dockerfile*
+docker-compose*.yml
